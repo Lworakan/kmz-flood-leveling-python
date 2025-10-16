@@ -1,0 +1,221 @@
+<!-- index.html -->
+<!DOCTYPE html>
+<html lang="en" style="height: 100%">
+<head>
+  <meta charset="UTF-8" />
+  <title>Flood Water Level 3D-like Extrusion (lon/lat)</title>
+  <script type="text/javascript" src="https://api.sphere.gistda.or.th/map/?key=YOUR_MAP_KEY"></script>
+  <style>
+    html, body, #map { height: 100%; margin: 0; }
+    #ui {
+      position: absolute; top: 12px; left: 12px; z-index: 10;
+      background: rgba(18, 32, 52, 0.9); color: #fff; padding: 10px; border-radius: 8px;
+      font-family: system-ui, sans-serif; box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+    }
+    #ui label { display: block; font-size: 12px; margin-bottom: 4px; }
+    #ui input, #ui button { width: 100%; margin-bottom: 8px; }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="ui">
+    <label>Global water depth (m)</label>
+    <input id="depth" type="number" step="0.1" min="0" value="1.2" />
+    <button id="apply">Apply</button>
+  </div>
+  <script>
+    // Example flood polygons in lon/lat. Replace with your own GeoJSON (Polygon/MultiPolygon).
+    // Each feature may include per-polygon depth (meters) in properties.depth.
+    const FLOOD_GEOJSON = {
+      "type": "FeatureCollection",
+      "features": [
+        {
+          "type": "Feature",
+          "properties": { "name": "Area A", "depth": 1.2 },
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [[
+              [100.493, 13.737],
+              [100.495, 13.737],
+              [100.495, 13.739],
+              [100.493, 13.739],
+              [100.493, 13.737]
+            ]]
+          }
+        },
+        {
+          "type": "Feature",
+          "properties": { "name": "Area B", "depth": 2.6 },
+          "geometry": {
+            "type": "Polygon",
+            "coordinates": [[
+              [100.497, 13.7375],
+              [100.499, 13.7375],
+              [100.499, 13.7395],
+              [100.497, 13.7395],
+              [100.497, 13.7375]
+            ]]
+          }
+        }
+      ]
+    };
+
+    // Map init
+    let map;
+    let layer;
+    let drawn = []; // store created feature IDs to update styles later
+
+    function init() {
+      map = new sphere.Map({
+        placeholder: document.getElementById("map"),
+      });
+
+      map.Event.bind(sphere.EventName.Ready, () => {
+        // Choose base map and tilt to get pseudo-3D effect
+        map.Layers.setBase(sphere.Layers.SIMPLE);
+        map.goTo({ center: [100.495, 13.738], zoom: 15, pitch: 60, bearing: -30 });
+
+        // Create a vector layer to hold polygons
+        layer = new sphere.Layer('flood', { type: sphere.LayerType.Feature });
+        map.Layers.add(layer);
+
+        // Draw polygons with depth-based color and “extrusion”
+        addFloodPolygons(FLOOD_GEOJSON);
+
+        // Bind UI
+        document.getElementById('apply').onclick = () => {
+          const v = parseFloat(document.getElementById('depth').value || '0');
+          updateGlobalDepth(v);
+        };
+      });
+    }
+
+    // Color mapping using Blues colormap-like ramp
+    function depthToColor(depth, minD, maxD) {
+      const t = (maxD > minD) ? (depth - minD) / (maxD - minD) : 0.5;
+      // ramp from light to dark blue
+      const c = [
+        Math.max(0, Math.min(1, 0.4 + 0.6 * 0.3)),                 // R (low)
+        Math.max(0, Math.min(1, 0.4 + 0.6 * (0.6 + 0.2 * t))),     // G
+        Math.max(0, Math.min(1, 0.4 + 0.6 * (0.9 - 0.3 * (1 - t))))// B
+      ];
+      const to255 = (x) => Math.round(x * 255);
+      return `rgba(${to255(c[0])},${to255(c[1])},${to255(c[2])},0.7)`;
+    }
+
+    // Convert meters depth to a small visual height in “map units”
+    // Sphere JS does not expose true 3D extruded polygons unless using Tiles3D/I3S.
+    // We simulate depth by style and shadow; alternatively, if sphere supports extrude in style, plug here.
+    function depthToExtrude(depthMeters) {
+      // scale factor so 1–3m depth looks visually distinct but not massive
+      return depthMeters * 0.05;
+    }
+
+    function addFloodPolygons(geojson) {
+      // compute depth stats
+      const depths = geojson.features.map(f => (f.properties?.depth ?? 1.0));
+      const minD = Math.min(...depths);
+      const maxD = Math.max(...depths);
+
+      // draw each polygon
+      geojson.features.forEach((feat, idx) => {
+        const d = depths[idx];
+
+        // Sphere Feature API: add polygon
+        const id = layer.Feature.add({
+          geometry: feat.geometry,
+          properties: {
+            name: feat.properties?.name ?? `Area ${idx + 1}`,
+            depth: d
+          },
+          style: {
+            // Fill color varies with depth
+            fill: {
+              color: depthToColor(d, minD, maxD)
+            },
+            // Outline slightly brighter
+            stroke: {
+              color: 'rgba(180,220,255,1)',
+              width: 1.5
+            },
+            // Optional “height” if Sphere supports it (check docs).
+            // If supported: use something like "height" or "extrude" in style options.
+            // Here we store our computed height for future updates.
+            meta: { extrude: depthToExtrude(d) },
+            // Add subtle shadow effect if available
+            shadow: { enabled: true, opacity: 0.35 }
+          }
+        });
+
+        drawn.push(id);
+
+        // Optional label: depth at centroid
+        const centroid = polygonCentroidLonLat(feat.geometry);
+        if (centroid) {
+          layer.Feature.add({
+            geometry: {
+              type: 'Point',
+              coordinates: centroid
+            },
+            properties: { label: `${(d).toFixed(1)} m` },
+            style: {
+              text: {
+                field: '{label}',
+                color: '#ffffff',
+                haloColor: '#0a2a5e',
+                haloWidth: 2,
+                size: 12,
+                weight: 'bold',
+                offsetY: -8
+              }
+            }
+          });
+        }
+      });
+    }
+
+    // Update all polygons to a new common depth
+    function updateGlobalDepth(newDepthMeters) {
+      const minD = newDepthMeters, maxD = newDepthMeters; // uniform
+      drawn.forEach(id => {
+        const f = layer.Feature.get(id);
+        if (!f) return;
+        const color = depthToColor(newDepthMeters, minD, maxD);
+        const h = depthToExtrude(newDepthMeters);
+        layer.Feature.update(id, {
+          style: {
+            fill: { color },
+            meta: { extrude: h }
+          },
+          properties: {
+            depth: newDepthMeters
+          }
+        });
+      });
+    }
+
+    // Compute centroid of a Polygon/MultiPolygon in lon/lat (simple average of exterior ring)
+    function polygonCentroidLonLat(geom) {
+      try {
+        if (geom.type === 'Polygon') {
+          const ring = geom.coordinates[0];
+          const n = ring.length;
+          let sx = 0, sy = 0;
+          for (let i = 0; i < n; i++) { sx += ring[i][0]; sy += ring[i][1]; }
+          return [sx / n, sy / n];
+        } else if (geom.type === 'MultiPolygon') {
+          const ring = geom.coordinates[0][0];
+          const n = ring.length;
+          let sx = 0, sy = 0;
+          for (let i = 0; i < n; i++) { sx += ring[i][0]; sy += ring[i][1]; }
+          return [sx / n, sy / n];
+        }
+      } catch (e) { /* ignore */ }
+      return null;
+    }
+
+    // Boot
+    window.onload = init;
+  </script>
+</body>
+</html>
